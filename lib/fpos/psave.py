@@ -18,11 +18,19 @@
 
 from .cdesc import cdesc
 from .predict import prune_groups, pd, icmf, last as last_cyclic
-from .visualise import extract_month, PeriodGroup
+from .visualise import extract_month, PeriodGroup, blacklist
 from collections import namedtuple
+import csv
+from pprint import pprint
+import sys
+import datetime
+import monthdelta
 
-tt = namedtuple("tt", [ "income", "expenses" ])
+tt = namedtuple("tt", [ "month", "income", "expenses" ])
 cdt = namedtuple("cdt", [ "name", "period", "last", "mean" ])
+
+def pm(datestr):
+    return datetime.datetime.strptime(datestr, "%m/%Y")
 
 def to_month_groups(transactions):
     monthly_grouper = PeriodGroup(extract_month)
@@ -31,20 +39,21 @@ def to_month_groups(transactions):
     return monthly_transactions
 
 def to_month_tts(transactions):
-    months = []
-    for month in transactions:
-        income = sum(float(elem[1]) for elem in month
+    months = [] 
+    for month, mts in transactions.items():
+        income = sum(float(elem[1]) for elem in mts
                 if float(elem[1]) >= 0)
-        expenses = sum(float(elem[1]) for elem in month
+        expenses = sum(float(elem[1]) for elem in mts
                 if float(elem[1]) < 0)
-        months.append(tt(income, expenses))
+        mtt = tt(month, income, expenses)
+        months.append(mtt)
     return months
 
 def to_cycle_descriptors(groups):
     cyclic_descriptors = []
     for gd in groups:
         n = len(gd.group)
-        name = gd.group[0][0]
+        name = gd.group[0][2]
         period = icmf(gd.deltas)
         last = last_cyclic(gd.group)
         mean = sum(float(elem[1]) for elem in gd.group) / n
@@ -52,34 +61,52 @@ def to_cycle_descriptors(groups):
     return cyclic_descriptors
 
 def psave(transactions):
-    groups = cdesc(transactions)
+    groups = cdesc(t for t in transactions if t[3] not in blacklist)
     last = pd(transactions[-1][0])
-    cyclic_groups = prune_groups(groups, last)
-    cyclic_group_descriptions = [ gd.group[0][0] for gd in cyclic_groups ]
+    cyclic_groups = list(prune_groups(groups, last))
+    # cyclic_group_descriptions = [ gd.group[0][2] for gd in cyclic_groups ]
     # FIXME: need to use normalised LCS
+    # acyclic_transactions = [ elem for elem in transactions
+    #        elem[3] != "Internal" ]
     acyclic_transactions = [ elem for elem in transactions
-            if elem[2] not in cyclic_group_descriptions ]
+            if elem[3] != "Internal" ]
     monthly_transactions = to_month_groups(acyclic_transactions)
-    monthly_tts = to_month_tts(monthly_transactions)
+    monthly_tts = sorted(to_month_tts(monthly_transactions),
+            key=lambda x: pm(x.month))
+    pprint(monthly_tts)
     cyclic_descriptors = to_cycle_descriptors(cyclic_groups)
     sorted_cyclic_descriptors = \
             sorted(cyclic_descriptors, key=lambda x: x.period, reverse=True)
     # Expenses is negative
     margins = [ elem.income + elem.expenses for elem in monthly_tts ]
+    pprint(margins)
     targets = { cd : cd.mean / (cd.period / 31) for cd in cyclic_descriptors }
-    actuals = {}
-    now = None
+    actuals = { cd : 0 for cd in sorted_cyclic_descriptors }
     for cd in sorted_cyclic_descriptors:
-        # Not semantically right
-        for month in (now - cd.last).months:
-            # Not semantically right
+        print(cd.name)
+        md = monthdelta.monthmod(cd.last, last)[0].months
+        print(md)
+        for month in range(-md, 0):
+            print("month index: -{}".format(month))
             if margins[month] > 0:
-                v = min(cd.mean, margins[month])
+                v = min(abs(cd.mean / (cd.period / 31)), margins[month])
+                print(v)
                 margins[month] -= v
                 actuals[cd] += v
-    print(targets)
-    print(actuals)
-    print(margins)
-    
+    print("TARGETS")
+    print("-------")
+    #pprint({ (k.name, k.period) : v for k, v in targets.items() if v != 0 })
+    pprint(targets)
+    print()
+    print("ACTUALS")
+    print("-------")
+    #pprint({ (k.name, k.period) : v for k, v in actuals.items() if v != 0 })
+    pprint(actuals)
+    print()
+    print("MARGINS")
+    print("-------")
+    pprint(margins)
+
 if __name__ == "__main__":
-    psave()
+    transactions = [ row for row in csv.reader(sys.stdin) ]
+    psave(transactions)
