@@ -52,22 +52,32 @@ def to_month_tts(transactions):
 def to_cycle_descriptors(groups):
     cyclic_descriptors = []
     for gd in groups:
-        n = len(gd.group)
         name = gd.group[0][2]
         period = icmf(gd.deltas)
         last = last_cyclic(gd.group)
-        mean = sum(float(elem[1]) for elem in gd.group) / n
+        mean = sum(float(elem[1]) for elem in gd.group) / sum(gd.deltas)
         cyclic_descriptors.append(cdt(name, period, last, mean))
     return cyclic_descriptors
+
+def balance(tts, longest):
+    assert longest < len(tts)
+    ltts = len(tts)
+    margins = [ elem.income + elem.expenses for elem in tts ]
+    for i in range(ltts - longest, ltts):
+        if margins[i] < 0:
+            for j in range(i, -1, -1):
+                if margins[j] > 0:
+                    v = min(-margins[i], margins[j])
+                    margins[i] += v
+                    margins[j] -= v
+                if margins[i] == 0:
+                    break
+    return margins
 
 def psave(transactions):
     groups = cdesc(t for t in transactions if t[3] not in blacklist)
     last = pd(transactions[-1][0])
     cyclic_groups = list(prune_groups(groups, last))
-    # cyclic_group_descriptions = [ gd.group[0][2] for gd in cyclic_groups ]
-    # FIXME: need to use normalised LCS
-    # acyclic_transactions = [ elem for elem in transactions
-    #        elem[3] != "Internal" ]
     acyclic_transactions = [ elem for elem in transactions
             if elem[3] != "Internal" ]
     monthly_transactions = to_month_groups(acyclic_transactions)
@@ -77,8 +87,8 @@ def psave(transactions):
     cyclic_descriptors = to_cycle_descriptors(cyclic_groups)
     sorted_cyclic_descriptors = \
             sorted(cyclic_descriptors, key=lambda x: x.period, reverse=True)
+    margins = balance(monthly_tts, int(sorted_cyclic_descriptors[0].period / 31))
     # Expenses is negative
-    margins = [ elem.income + elem.expenses for elem in monthly_tts ]
     pprint(margins)
     targets = { cd : cd.mean / (cd.period / 31) for cd in cyclic_descriptors }
     actuals = { cd : 0 for cd in sorted_cyclic_descriptors }
@@ -86,13 +96,18 @@ def psave(transactions):
         print(cd.name)
         md = monthdelta.monthmod(cd.last, last)[0].months
         print(md)
-        for month in range(-md, 0):
-            print("month index: -{}".format(month))
-            if margins[month] > 0:
-                v = min(abs(cd.mean / (cd.period / 31)), margins[month])
-                print(v)
-                margins[month] -= v
-                actuals[cd] += v
+        if md == 0 and margins[-1] > 0:
+            v = min(-(cd.mean * (31 / cd.period)), margins[-1])
+            margins[-1] -= v
+            actuals[cd] += v
+        else:
+            for month in range(-md, 0):
+                print("month index: {}".format(month))
+                if margins[month] > 0:
+                    v = min(-(cd.mean / (cd.period / 31)), margins[month])
+                    print(v)
+                    margins[month] -= v
+                    actuals[cd] += v
     print("TARGETS")
     print("-------")
     #pprint({ (k.name, k.period) : v for k, v in targets.items() if v != 0 })
