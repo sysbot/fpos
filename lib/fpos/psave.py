@@ -77,45 +77,70 @@ def balance(margins, longest):
                     break
     return margins
 
-def psave(transactions):
-    external = [ elem for elem in transactions if elem[2] != "Internal" ]
-    monthly_transactions = to_month_groups(external)
-    completed = list(chain(*[mts.transactions for mts in monthly_transactions[:-1]]))
-    incomplete = monthly_transactions[-1].transactions
-    assert 3 < len(completed)
-    groups = cdesc(t for t in completed if t[2] not in blacklist)
-    last_completed = pd(completed[-1][0])
-    cyclic_groups = list(prune_groups(groups, last_completed))
-    monthly_tts = sorted(to_month_tts(monthly_transactions[:-1]), key=lambda x: pm(x.month))
-    cyclic_descriptors = to_cycle_descriptors(cyclic_groups)
-    sorted_cyclic_descriptors = \
-            sorted(cyclic_descriptors, key=lambda x: x.period, reverse=True)
-    unbalanced = [ elem.income + elem.expenses for elem in monthly_tts ]
-    balanced = balance(unbalanced, int(sorted_cyclic_descriptors[0].period / 31))
-    # Expenses are negative
-    targets = { cd : cd.mean / (cd.period / 31) for cd in cyclic_descriptors }
-    actuals = { cd : 0 for cd in sorted_cyclic_descriptors }
-    for cd in sorted_cyclic_descriptors:
-        md = monthdelta.monthmod(cd.last, last_completed)[0].months
-        if md == 0 and balanced[-1] > 0:
-            v = min(-(cd.mean * (31 / cd.period)), balanced[-1])
-            balanced[-1] -= v
+def calculate_targets(cyclic):
+    return { cd : cd.mean / (cd.period / 31) for cd in cyclic }
+
+def calculate_actuals(cyclic, balanced, last):
+    ibalanced = balanced[:]
+    actuals = { cd : 0 for cd in cyclic }
+    for cd in cyclic:
+        md = monthdelta.monthmod(cd.last, last)[0].months
+        if md < 1 and ibalanced[-1] > 0:
+            v = min(-(cd.mean * (31 / cd.period)), ibalanced[-1])
+            ibalanced[-1] -= v
             actuals[cd] += v
         else:
             for month in range(-md, 0):
-                if balanced[month] > 0:
-                    v = min(-(cd.mean / (cd.period / 31)), balanced[month])
-                    balanced[month] -= v
+                if ibalanced[month] > 0:
+                    v = min(-(cd.mean / (cd.period / 31)), ibalanced[month])
+                    ibalanced[month] -= v
                     actuals[cd] += v
+    return actuals
 
+def calculate_due(cyclic, last):
     due = {}
-    current = pd(transactions[-1][0])
-    for cd in sorted_cyclic_descriptors:
+    for cd in cyclic:
         when = cd.last + datetime.timedelta(cd.period)
-        if when.month == current.month and when.year == current.year:
+        if when.month == last.month and when.year == last.year:
             due[cd.name] = cd
     pprint(due)
     print()
+    return due
+
+def psave(transactions):
+    external = [ elem for elem in transactions if elem[3] != "Internal" ]
+    monthly_transactions = to_month_groups(external)
+    completed = \
+        list(chain(*[mts.transactions for mts in monthly_transactions[:-1]]))
+    incomplete = monthly_transactions[-1].transactions
+    groups = cdesc(t for t in completed if t[3] not in blacklist)
+    last_completed = pd(completed[-1][0])
+    cyclic_groups = list(prune_groups(groups, last_completed))
+    monthly_tts = to_month_tts(monthly_transactions[:-1])
+    sorted_monthly_tts = sorted(monthly_tts, key=lambda x: pm(x.month))
+    cyclic_descriptors = to_cycle_descriptors(cyclic_groups)
+    sorted_cyclic_descriptors = \
+            sorted(cyclic_descriptors, key=lambda x: x.period, reverse=True)
+    unbalanced = [ elem.income + elem.expenses for elem in sorted_monthly_tts ]
+    balanced = balance(unbalanced, int(sorted_cyclic_descriptors[0].period / 31))
+    targets = calculate_targets(cyclic_descriptors)
+    actuals = calculate_actuals(sorted_cyclic_descriptors, balanced, last_completed)
+    last_incomplete = pd(transactions[-1][0])
+    due = calculate_due(sorted_cyclic_descriptors, last_incomplete)
+
+    print("TARGETS")
+    print("-------")
+    #pprint({ (k.name, k.period) : v for k, v in targets.items() if v != 0 })
+    pprint(targets)
+    print()
+    print("ACTUALS")
+    print("-------")
+    #pprint({ (k.name, k.period) : v for k, v in actuals.items() if v != 0 })
+    pprint(actuals)
+    print()
+    print("MARGINS")
+    print("-------")
+    pprint(balanced)
 
     for transaction in incomplete:
         if transaction[3] in blacklist:
@@ -133,19 +158,9 @@ def psave(transactions):
             print()
             actuals[due[desc]] = remaining
 
-    print("TARGETS")
-    print("-------")
-    #pprint({ (k.name, k.period) : v for k, v in targets.items() if v != 0 })
-    pprint(targets)
-    print()
-    print("ACTUALS")
-    print("-------")
-    #pprint({ (k.name, k.period) : v for k, v in actuals.items() if v != 0 })
-    pprint(actuals)
-    print()
-    print("MARGINS")
-    print("-------")
-    pprint(balanced)
+    plan = []
+    for d in due.values():
+        for n in range(last_incomplete - d.last, 31, d.period):
 
 if __name__ == "__main__":
     transactions = [ row for row in csv.reader(sys.stdin) ]
