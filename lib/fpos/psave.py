@@ -16,12 +16,12 @@
 #    You should have received a copy of the GNU General Public License
 #    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+from .core import money
 from .cdesc import cdesc
 from .predict import prune_groups, pd, icmf, last as last_cyclic
 from .visualise import extract_month, PeriodGroup, blacklist
 from collections import namedtuple
 import csv
-from pprint import pprint
 import sys
 import datetime
 import monthdelta
@@ -103,9 +103,15 @@ def calculate_due(cyclic, last):
         when = cd.last + datetime.timedelta(cd.period)
         if when.month == last.month and when.year == last.year:
             due[cd.name] = cd
-    pprint(due)
-    print()
     return due
+
+def render_cycle(cycle, start, days):
+    delta = (start - cycle.last).days
+    for i in range(cycle.period - delta, len(days), cycle.period):
+        if not days[i]:
+            days[i] = []
+        days[i].append(cycle)
+    return days
 
 def psave(transactions):
     external = [ elem for elem in transactions if elem[3] != "Internal" ]
@@ -122,45 +128,34 @@ def psave(transactions):
     sorted_cyclic_descriptors = \
             sorted(cyclic_descriptors, key=lambda x: x.period, reverse=True)
     unbalanced = [ elem.income + elem.expenses for elem in sorted_monthly_tts ]
-    balanced = balance(unbalanced, int(sorted_cyclic_descriptors[0].period / 31))
+    longest_cycle = int(sorted_cyclic_descriptors[0].period / 31)
+    balanced = balance(unbalanced, longest_cycle)
     targets = calculate_targets(cyclic_descriptors)
     actuals = calculate_actuals(sorted_cyclic_descriptors, balanced, last_completed)
     last_incomplete = pd(transactions[-1][0])
     due = calculate_due(sorted_cyclic_descriptors, last_incomplete)
 
-    print("TARGETS")
-    print("-------")
-    #pprint({ (k.name, k.period) : v for k, v in targets.items() if v != 0 })
-    pprint(targets)
-    print()
-    print("ACTUALS")
-    print("-------")
-    #pprint({ (k.name, k.period) : v for k, v in actuals.items() if v != 0 })
-    pprint(actuals)
-    print()
-    print("MARGINS")
-    print("-------")
-    pprint(balanced)
+    plan = [ None ] * sorted_cyclic_descriptors[0].period
+    first_day = \
+            datetime.datetime(last_incomplete.year, last_incomplete.month, 1)
+    for d in sorted_cyclic_descriptors:
+        plan = render_cycle(d, first_day, plan)
 
-    for transaction in incomplete:
-        if transaction[3] in blacklist:
+    print("Date | Description | Cost | Effective | Sum Cost | Sum Effective")
+    agg_cost = 0
+    agg_effective = 0
+    for i, cts in enumerate(plan):
+        if not cts:
             continue
-        # FIXME: Use nlcs() to test membership
-        desc = transaction[2]
-        if desc in due:
-            print("Found {} in due".format(desc))
-            spent = float(transaction[1])
-            saved = actuals[due[desc]]
-            effective = min(0, spent + saved)
-            remaining = max(0, spent + saved)
-            print("{} saved {}, spent {}, effective {}, impact {}"
-                    .format(desc, saved, spent, effective, remaining))
-            print()
-            actuals[due[desc]] = remaining
-
-    plan = []
-    for d in due.values():
-        for n in range(last_incomplete - d.last, 31, d.period):
+        date = first_day + datetime.timedelta(i)
+        for cd in cts:
+            saved = actuals[cd]
+            effective = min(0, cd.mean + saved)
+            actuals[cd] = max(0, cd.mean + saved)
+            agg_cost += cd.mean
+            agg_effective += effective
+            print("{} | {} | {} | {} | {} | {}"
+                    .format(date.strftime("%d/%m/%Y"), cd.name, money(cd.mean), money(effective), money(agg_cost), money(agg_effective)))
 
 if __name__ == "__main__":
     transactions = [ row for row in csv.reader(sys.stdin) ]
