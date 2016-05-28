@@ -113,6 +113,62 @@ def db_show(args):
     with open(db_file, "r") as db:
         visualise(list(window(csv.reader(db), relspan=12)), save=args.save)
 
+def db_save_exit(config):
+    with open(find_config(), "w") as config_fo:
+        toml.dump(config, config_fo)
+
+def db_save_dump(config):
+    if "save" in config:
+        for k in config["save"]:
+            print("{}: {}".format(k, config["save"][k]))
+    if "periodic" in config:
+        for k in config["periodic"]:
+            print("{}: {}".format(k, config["periodic"][k]))
+
+def db_save_save(config):
+    if "save" not in config:
+        config["save"] = {}
+    name = input("\tName: ")
+    amount = input("\tAmount: ")
+    deadline = input("\tDeadline: ")
+    config["save"][name] = {
+            "name" : name,
+            "amount" : amount,
+            "deadline" : deadline
+    }
+
+def db_save_periodic(config):
+    if "periodic" not in config:
+        config["periodic"] = {}
+    name = input("\tName: ")
+    amount = float(input("\tAmount: "))
+    period = int(input("\tPeriod (days): "))
+    start = input("\tStart: ")
+    config["periodic"][name] = {
+            "name" : name,
+            "amount" : amount,
+            "period" : period,
+            "start" : start
+    }
+
+def db_save(args):
+    dispatch = {
+            "exit" : db_save_exit,
+            "dump" : db_save_dump,
+            "save" : db_save_save,
+            "periodic" : db_save_periodic,
+    }
+    config_file = find_config()
+    config = as_toml(config_file)
+    section = config[args.nickname]
+    cmd_help = ", ".join(sorted(dispatch.keys()))
+    while True:
+        cmd = input("Action ({}): ".format(cmd_help))
+        if cmd == "exit":
+            dispatch[cmd](config)
+            break
+        dispatch[cmd](section)
+
 def parse_args(subparser):
     sc_init = subparser.add_parser("init")
     sc_init.add_argument("nickname", metavar="STRING", help="Nickname for the database")
@@ -127,7 +183,10 @@ def parse_args(subparser):
     sc_show.add_argument("nickname", metavar="STRING", help="Nickname for the database")
     sc_show.add_argument("--save", type=float, default=0)
     sc_show.set_defaults(db_func=db_show)
-    return [ sc_init, sc_update, sc_show ]
+    sc_save = subparser.add_parser("save")
+    sc_save.add_argument("nickname", metavar="STRING", help="Nickname for the database")
+    sc_save.set_defaults(db_func=db_save)
+    return [ sc_init, sc_update, sc_show, sc_save ]
 
 def main(args):
     args.db_func(args)
