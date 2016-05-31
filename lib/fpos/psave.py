@@ -173,6 +173,12 @@ def psave(transactions, config):
     for d in sorted_cyclic_descriptors:
         plan = render_cycle(d, first_day, plan)
 
+    print("Description | Period | Cost | Saved")
+    for cd in sorted_cyclic_descriptors:
+        if cd.period > 31:
+            print("{} | {} | {} | {}".format(cd.name, cd.period, money(cd.mean), money(actuals[cd])))
+
+    print()
     print("Date | Description | Cost | Effective | Sum Cost | Sum Effective")
     agg_cost = 0
     agg_effective = 0
@@ -188,6 +194,7 @@ def psave(transactions, config):
             agg_effective += effective
             print("{} | {} | {} | {} | {} | {}"
                     .format(date.strftime("%d/%m/%Y"), cd.name, money(cd.mean), money(effective), money(agg_cost), money(agg_effective)))
+
 
 if __name__ == "__main__":
     transactions = [ row for row in csv.reader(sys.stdin) ]
