@@ -23,6 +23,7 @@ from itertools import chain
 from .transform import transform
 from .window import window
 from .visualise import visualise
+from .core import date_fmt
 from xdg import BaseDirectory as bd
 import argparse
 import csv
@@ -31,6 +32,7 @@ import shutil
 import sys
 import tempfile
 import toml
+import datetime
 
 cmd_description = \
         """Manage fpos CSV databases"""
@@ -132,6 +134,7 @@ def db_save_save(config):
     amount = input("\tAmount: ")
     deadline = input("\tDeadline: ")
     config["save"][name] = {
+            "entered" : datetime.datetime.now().strftime(date_fmt),
             "name" : name,
             "amount" : amount,
             "deadline" : deadline
@@ -145,6 +148,7 @@ def db_save_periodic(config):
     period = int(input("\tPeriod (days): "))
     start = input("\tStart: ")
     config["periodic"][name] = {
+            "entered" : datetime.datetime.now().strftime(date_fmt),
             "name" : name,
             "amount" : amount,
             "period" : period,

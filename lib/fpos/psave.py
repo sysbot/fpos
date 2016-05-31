@@ -20,6 +20,7 @@ from .core import money
 from .cdesc import cdesc
 from .predict import prune_groups, pd, icmf, last as last_cyclic
 from .visualise import extract_month, PeriodGroup, blacklist
+from .db import find_config, as_toml
 from collections import namedtuple
 import csv
 import sys
@@ -29,7 +30,7 @@ from itertools import chain
 
 mtt = namedtuple("mtt", [ "month", "transactions" ])
 tt = namedtuple("tt", [ "month", "income", "expenses" ])
-cdt = namedtuple("cdt", [ "name", "period", "last", "mean" ])
+cdt = namedtuple("cdt", [ "name", "period", "last", "mean", "next" ])
 
 def pm(datestr):
     return datetime.datetime.strptime(datestr, "%m/%Y")
@@ -59,12 +60,12 @@ def to_cycle_descriptors(groups):
         period = icmf(gd.deltas)
         last = last_cyclic(gd.group)
         mean = sum(float(elem[1]) for elem in gd.group) / sum(gd.deltas)
-        cyclic_descriptors.append(cdt(name, period, last, mean))
+        cyclic_descriptors.append(cdt(name, period, last, mean, None))
     return cyclic_descriptors
 
 def balance(margins, longest):
     nmonths = len(margins)
-    assert longest < nmonths, "longest = {}, nmonths = {}".format(longest, nmonths)
+    assert longest <= nmonths, "longest = {}, nmonths = {}".format(longest, nmonths)
     for i in range(nmonths - longest, nmonths):
         if margins[i] < 0:
             # Find savings, i.e. backwards in time
@@ -78,7 +79,8 @@ def balance(margins, longest):
     return margins
 
 def calculate_targets(cyclic):
-    return { cd : cd.mean / (cd.period / 31) for cd in cyclic }
+    return { cd : cd.mean / (cd.period / 31) if cd.period else cd.mean
+            for cd in cyclic }
 
 def calculate_actuals(cyclic, balanced, last):
     ibalanced = balanced[:]
@@ -105,7 +107,35 @@ def calculate_due(cyclic, last):
             due[cd.name] = cd
     return due
 
+def savings_targets(config):
+    targets = []
+    if "save" not in config:
+        return targets
+    for elem in config["save"].values():
+        targets.append(cdt(elem["name"], None, pd(elem["entered"]), elem["amount"], pd(elem["deadline"])))
+    return targets
+
+def synthetic_cycles(config):
+    cycles = []
+    if "periodic" not in config:
+        return cycles
+    for elem in config["periodic"].values():
+        entered = pd(elem["entered"])
+        start = pd(elem["start"])
+        if entered < start:
+            cycle = cdt(elem["name"], elem["period"], entered, elem["amount"], start)
+        else:
+            cycle = cdt(elem["name"], elem["period"], start, elem["amount"], None)
+        cycles.append(cycle)
+    return cycles
+
 def render_cycle(cycle, start, days):
+    if cycle.next and cycle.next > start:
+        i = (cycle.next - start).days
+        if not days[i]:
+            days[i] = []
+        days[i].append(cycle)
+        return days
     delta = (start - cycle.last).days
     for i in range(cycle.period - delta, len(days), cycle.period):
         if not days[i]:
@@ -113,7 +143,7 @@ def render_cycle(cycle, start, days):
         days[i].append(cycle)
     return days
 
-def psave(transactions):
+def psave(transactions, config):
     external = [ elem for elem in transactions if elem[3] != "Internal" ]
     monthly_transactions = to_month_groups(external)
     completed = \
@@ -125,6 +155,8 @@ def psave(transactions):
     monthly_tts = to_month_tts(monthly_transactions[:-1])
     sorted_monthly_tts = sorted(monthly_tts, key=lambda x: pm(x.month))
     cyclic_descriptors = to_cycle_descriptors(cyclic_groups)
+    cyclic_descriptors.extend(savings_targets(config))
+    cyclic_descriptors.extend(synthetic_cycles(config))
     sorted_cyclic_descriptors = \
             sorted(cyclic_descriptors, key=lambda x: x.period, reverse=True)
     unbalanced = [ elem.income + elem.expenses for elem in sorted_monthly_tts ]
@@ -159,4 +191,6 @@ def psave(transactions):
 
 if __name__ == "__main__":
     transactions = [ row for row in csv.reader(sys.stdin) ]
-    psave(transactions)
+    if 2 > len(sys.argv):
+        print("Need a database name as an argument")
+    psave(transactions, as_toml(find_config())[sys.argv[1]])
