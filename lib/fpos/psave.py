@@ -16,7 +16,7 @@
 #    You should have received a copy of the GNU General Public License
 #    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-from .core import money
+from .core import money, date_fmt
 from .cdesc import cdesc
 from .predict import prune_groups, pd, icmf, last as last_cyclic
 from .visualise import extract_month, PeriodGroup, blacklist
@@ -30,7 +30,7 @@ from itertools import chain
 
 mtt = namedtuple("mtt", [ "month", "transactions" ])
 tt = namedtuple("tt", [ "month", "income", "expenses" ])
-cdt = namedtuple("cdt", [ "name", "period", "last", "mean", "next" ])
+cdt = namedtuple("cdt", [ "name", "period", "last", "mean", "next", "dist" ])
 
 def pm(datestr):
     return datetime.datetime.strptime(datestr, "%m/%Y")
@@ -60,7 +60,8 @@ def to_cycle_descriptors(groups):
         period = icmf(gd.deltas)
         last = last_cyclic(gd.group)
         mean = sum(float(elem[1]) for elem in gd.group) / sum(gd.deltas)
-        cyclic_descriptors.append(cdt(name, period, last, mean, None))
+        dist = tuple(gd.deltas)
+        cyclic_descriptors.append(cdt(name, period, last, mean, None, dist))
     return cyclic_descriptors
 
 def balance(margins, longest):
@@ -112,7 +113,7 @@ def savings_targets(config):
     if "save" not in config:
         return targets
     for elem in config["save"].values():
-        targets.append(cdt(elem["name"], None, pd(elem["entered"]), elem["amount"], pd(elem["deadline"])))
+        targets.append(cdt(elem["name"], None, pd(elem["entered"]), elem["amount"], pd(elem["deadline"]), None))
     return targets
 
 def synthetic_cycles(config):
@@ -122,10 +123,12 @@ def synthetic_cycles(config):
     for elem in config["periodic"].values():
         entered = pd(elem["entered"])
         start = pd(elem["start"])
+        dist = [ 0 ] * elem["period"]
+        dist[-1] = 1
         if entered < start:
-            cycle = cdt(elem["name"], elem["period"], entered, elem["amount"], start)
+            cycle = cdt(elem["name"], elem["period"], start - datetime.timedelta(elem["period"]), elem["amount"], start, dist)
         else:
-            cycle = cdt(elem["name"], elem["period"], start, elem["amount"], None)
+            cycle = cdt(elem["name"], elem["period"], start, elem["amount"], start + datetime.timedelta(elem["period"]), dist)
         cycles.append(cycle)
     return cycles
 
@@ -143,42 +146,38 @@ def render_cycle(cycle, start, days):
         days[i].append(cycle)
     return days
 
-def psave(transactions, config):
-    external = [ elem for elem in transactions if elem[3] != "Internal" ]
-    monthly_transactions = to_month_groups(external)
-    completed = \
-        list(chain(*[mts.transactions for mts in monthly_transactions[:-1]]))
-    incomplete = monthly_transactions[-1].transactions
-    groups = cdesc(t for t in completed if t[3] not in blacklist)
-    last_completed = pd(completed[-1][0])
-    cyclic_groups = list(prune_groups(groups, last_completed))
-    monthly_tts = to_month_tts(monthly_transactions[:-1])
-    sorted_monthly_tts = sorted(monthly_tts, key=lambda x: pm(x.month))
-    cyclic_descriptors = to_cycle_descriptors(cyclic_groups)
-    cyclic_descriptors.extend(savings_targets(config))
-    cyclic_descriptors.extend(synthetic_cycles(config))
-    sorted_cyclic_descriptors = \
-            sorted(cyclic_descriptors, key=lambda x: x.period, reverse=True)
-    unbalanced = [ elem.income + elem.expenses for elem in sorted_monthly_tts ]
-    longest_cycle = int(sorted_cyclic_descriptors[0].period / 31)
-    balanced = balance(unbalanced, longest_cycle)
-    targets = calculate_targets(cyclic_descriptors)
-    actuals = calculate_actuals(sorted_cyclic_descriptors, balanced, last_completed)
-    last_incomplete = pd(transactions[-1][0])
-    due = calculate_due(sorted_cyclic_descriptors, last_incomplete)
+def first(l, key):
+    for i, v in enumerate(l):
+        if key(v):
+            return i
+    raise ValueError("Failed to find index meeting condition in {}".format(l))
 
-    plan = [ None ] * sorted_cyclic_descriptors[0].period
-    first_day = \
-            datetime.datetime(last_incomplete.year, last_incomplete.month, 1)
-    for d in sorted_cyclic_descriptors:
-        plan = render_cycle(d, first_day, plan)
+def calculate_next(cycle, last=None):
+    n = None
+    if cycle.next:
+        n = cycle.next
+    else:
+        n = cycle.last + datetime.timedelta(cycle.period)
+    if not last or n > last:
+        return n
+    if cycle.dist and cycle.last:
+        longest = cycle.last + datetime.timedelta(len(cycle.dist)) > last
+        if longest > last:
+            passed = (last - cycle.last).days
+            i = first(cycle.dist[passed:], lambda x: x > 0)
+            return cycle.last + datetime.timedelta(passed + i)
+    raise ValueError("No spend after {} for {}".format(last, cycle))
 
-    print("Description | Period | Cost | Saved")
-    for cd in sorted_cyclic_descriptors:
-        if cd.period > 31:
-            print("{} | {} | {} | {}".format(cd.name, cd.period, money(cd.mean), money(actuals[cd])))
+def sort_cycles(cycles, mk=None, nk=None):
+    if not mk:
+        mk = lambda x: x.mean
+    if not nk:
+        nk = lambda x: calculate_next(x)
+    a = sorted(cycles, key=mk)
+    b = sorted(a, key=nk)
+    return b
 
-    print()
+def dump_plan(plan, first_day, actuals):
     print("Date | Description | Cost | Effective | Sum Cost | Sum Effective")
     agg_cost = 0
     agg_effective = 0
@@ -192,8 +191,57 @@ def psave(transactions, config):
             actuals[cd] = max(0, cd.mean + saved)
             agg_cost += cd.mean
             agg_effective += effective
-            print("{} | {} | {} | {} | {} | {}"
-                    .format(date.strftime("%d/%m/%Y"), cd.name, money(cd.mean), money(effective), money(agg_cost), money(agg_effective)))
+            print("{} | {} | {} | {} | {} | {}".format(
+                date.strftime("%d/%m/%Y"),
+                cd.name,
+                money(cd.mean),
+                money(effective),
+                money(agg_cost),
+                money(agg_effective)))
+
+def prune_old_cycles(cycles):
+    return cycles
+
+def realise(cycles, transactions):
+    pass
+
+def psave(transactions, config):
+    external = [ elem for elem in transactions if elem[3] != "Internal" ]
+    monthly_transactions = to_month_groups(external)
+    completed = \
+        list(chain(*[mts.transactions for mts in monthly_transactions[:-1]]))
+    groups = cdesc(t for t in completed if t[3] not in blacklist)
+    last_completed = pd(completed[-1][0])
+    cyclic_groups = list(prune_groups(groups, last_completed))
+    monthly_tts = to_month_tts(monthly_transactions[:-1])
+    sorted_monthly_tts = sorted(monthly_tts, key=lambda x: pm(x.month))
+    cyclic_descriptors = to_cycle_descriptors(cyclic_groups)
+    cyclic_descriptors.extend(savings_targets(config))
+    cyclic_descriptors.extend(synthetic_cycles(config))
+    pruned_cyclic_descriptors = prune_old_cycles(cyclic_descriptors)
+    nk = lambda x: calculate_next(x, last_completed)
+    sorted_cyclic_descriptors = sort_cycles(pruned_cyclic_descriptors, nk=nk)
+    unbalanced = [ elem.income + elem.expenses for elem in sorted_monthly_tts ]
+    longest_cycle = max(x.period for x in sorted_cyclic_descriptors)
+    balanced = balance(unbalanced, int(longest_cycle / 31))
+    actuals = calculate_actuals(sorted_cyclic_descriptors, balanced, last_completed)
+
+    print("Description | Period | Next | Cost | Saved")
+    for cd in sorted_cyclic_descriptors:
+        if cd.period > 31:
+            print("{} | {} | {} | {} | {}".format(cd.name, cd.period, calculate_next(cd, last_completed).strftime(date_fmt), money(cd.mean), money(actuals[cd])))
+
+    # incomplete = monthly_transactions[-1].transactions
+    # last_incomplete = pd(transactions[-1][0])
+    # targets = calculate_targets(cyclic_descriptors)
+    # due = calculate_due(sorted_cyclic_descriptors, last_incomplete)
+    # plan = [ None ] * longest_cycle
+    # first_day = \
+    #        datetime.datetime(last_incomplete.year, last_incomplete.month, 1)
+    # for d in sorted_cyclic_descriptors:
+    #    plan = render_cycle(d, first_day, plan)
+    # print()
+    # dump_plan(plan, first_day, actuals)
 
 
 if __name__ == "__main__":
