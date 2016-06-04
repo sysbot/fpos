@@ -276,9 +276,9 @@ gdt = namedtuple("gdt", [ "group", "deltas" ])
 fet = namedtuple("fet", ["distance", "previous", "next", "description", "n",
     "period", "mean"])
 
-def prune_groups(groups, date):
+def prune_groups(groups, date, keep=None):
     gds = ( gdt(g, group_delta_bins(group_deltas(g)))
-            for g in groups if len(g) > 2 )
+            for g in groups if len(g) > 2 or (keep and keep(g[0][2])))
     return ( gd for gd in gds if 0 < len(gd.deltas) and
                 period(gd.deltas) > (date - last(gd.group)).days )
 

@@ -17,11 +17,12 @@
 #    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 from .core import money, date_fmt
-from .cdesc import cdesc
 from .predict import prune_groups, pd, icmf, last as last_cyclic
 from .visualise import extract_month, PeriodGroup, blacklist
 from .db import find_config, as_toml
 from collections import namedtuple
+from .cdesc import cdesc
+import pystrgrp
 import csv
 import sys
 import datetime
@@ -59,7 +60,7 @@ def to_cycle_descriptors(groups):
         name = gd.group[0][2]
         period = icmf(gd.deltas)
         last = last_cyclic(gd.group)
-        mean = sum(float(elem[1]) for elem in gd.group) / sum(gd.deltas)
+        mean = sum(float(elem[1]) for elem in gd.group) / (sum(gd.deltas) + 1)
         dist = tuple(gd.deltas)
         cyclic_descriptors.append(cdt(name, period, last, mean, None, dist))
     return cyclic_descriptors
@@ -125,6 +126,7 @@ def synthetic_cycles(config):
         start = pd(elem["start"])
         dist = [ 0 ] * elem["period"]
         dist[-1] = 1
+        dist = tuple(dist)
         if entered < start:
             cycle = cdt(elem["name"], elem["period"], start - datetime.timedelta(elem["period"]), elem["amount"], start, dist)
         else:
@@ -135,12 +137,12 @@ def synthetic_cycles(config):
 def render_cycle(cycle, start, days):
     if cycle.next and cycle.next > start:
         i = (cycle.next - start).days
-        if not days[i]:
+        if i < len(days) and not days[i]:
             days[i] = []
         days[i].append(cycle)
         return days
     delta = (start - cycle.last).days
-    for i in range(cycle.period - delta, len(days), cycle.period):
+    for i in range(max(0, cycle.period - delta), len(days), cycle.period):
         if not days[i]:
             days[i] = []
         days[i].append(cycle)
@@ -161,7 +163,7 @@ def calculate_next(cycle, last=None):
     if not last or n > last:
         return n
     if cycle.dist and cycle.last:
-        longest = cycle.last + datetime.timedelta(len(cycle.dist)) > last
+        longest = cycle.last + datetime.timedelta(len(cycle.dist))
         if longest > last:
             passed = (last - cycle.last).days
             i = first(cycle.dist[passed:], lambda x: x > 0)
@@ -202,22 +204,46 @@ def dump_plan(plan, first_day, actuals):
 def prune_old_cycles(cycles):
     return cycles
 
-def realise(cycles, transactions):
-    pass
+def realise(cycles, transactions, actuals):
+    grouper = pystrgrp.Strgrp()
+    for c in cycles:
+        grouper.add(c.name.upper(), c)
+    realised = {}
+    for t in transactions:
+        g = grouper.grp_for(t[2].upper())
+        if not g:
+            continue
+        c = next(g).value()
+        realised[c] = actuals[c]
+    return realised
+
+def calculate_groups_a(transactions):
+    grouper = pystrgrp.Strgrp()
+    for t in transactions:
+        grouper.add(t[2].upper(), t)
+    g = [ [ g.key(), [ x.value() for x in g ] ] for g in grouper ]
+    return [ x[1] for x in g ]
+
+def calculate_groups(transactions):
+    return cdesc(transactions)
 
 def psave(transactions, config):
     external = [ elem for elem in transactions if elem[3] != "Internal" ]
     monthly_transactions = to_month_groups(external)
     completed = \
         list(chain(*[mts.transactions for mts in monthly_transactions[:-1]]))
-    groups = cdesc(t for t in completed if t[3] not in blacklist)
+    groups = \
+        calculate_groups(t for t in completed if t[3] not in blacklist)
     last_completed = pd(completed[-1][0])
-    cyclic_groups = list(prune_groups(groups, last_completed))
+    save = savings_targets(config)
+    synthetic = synthetic_cycles(config)
+    keep = lambda x: any(k.name.upper() in x.upper() for k in synthetic)
+    cyclic_groups = list(prune_groups(groups, last_completed, keep=keep))
     monthly_tts = to_month_tts(monthly_transactions[:-1])
     sorted_monthly_tts = sorted(monthly_tts, key=lambda x: pm(x.month))
     cyclic_descriptors = to_cycle_descriptors(cyclic_groups)
-    cyclic_descriptors.extend(savings_targets(config))
-    cyclic_descriptors.extend(synthetic_cycles(config))
+    cyclic_descriptors.extend(save)
+    #cyclic_descriptors.extend(synthetic)
     pruned_cyclic_descriptors = prune_old_cycles(cyclic_descriptors)
     nk = lambda x: calculate_next(x, last_completed)
     sorted_cyclic_descriptors = sort_cycles(pruned_cyclic_descriptors, nk=nk)
@@ -229,20 +255,27 @@ def psave(transactions, config):
     print("Description | Period | Next | Cost | Saved")
     for cd in sorted_cyclic_descriptors:
         if cd.period > 31:
-            print("{} | {} | {} | {} | {}".format(cd.name, cd.period, calculate_next(cd, last_completed).strftime(date_fmt), money(cd.mean), money(actuals[cd])))
+            print("{} | {} | {} | {} | {}".format(
+                cd.name,
+                cd.period,
+                calculate_next(cd, last_completed).strftime(date_fmt),
+                money(cd.mean),
+                money(actuals[cd])))
 
-    # incomplete = monthly_transactions[-1].transactions
-    # last_incomplete = pd(transactions[-1][0])
-    # targets = calculate_targets(cyclic_descriptors)
-    # due = calculate_due(sorted_cyclic_descriptors, last_incomplete)
-    # plan = [ None ] * longest_cycle
-    # first_day = \
-    #        datetime.datetime(last_incomplete.year, last_incomplete.month, 1)
-    # for d in sorted_cyclic_descriptors:
-    #    plan = render_cycle(d, first_day, plan)
-    # print()
-    # dump_plan(plan, first_day, actuals)
+    last_incomplete = pd(transactions[-1][0])
+    plan = [ None ] * 31
+    first_day = \
+           datetime.datetime(last_incomplete.year, last_incomplete.month, 1)
+    for d in sorted_cyclic_descriptors:
+        plan = render_cycle(d, first_day, plan)
 
+    incomplete = monthly_transactions[-1].transactions
+    realised = realise(sorted_cyclic_descriptors, incomplete, actuals)
+    sum_realised = sum(realised.values())
+    cost = sum(float(y.mean) for x in plan if x for y in x)
+
+    print()
+    print("Estimated costs\n{} ({} + {})".format(cost + sum_realised, cost, sum_realised))
 
 if __name__ == "__main__":
     transactions = [ row for row in csv.reader(sys.stdin) ]
